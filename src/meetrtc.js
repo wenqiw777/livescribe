@@ -11,6 +11,15 @@
 
   const EVENT = 'livescribe-meet';
   const LABEL_CAPTIONS = 'captions';
+  // Meet renamed its caption channel: current builds use "captions_v2", older
+  // ones "captions". Tactiq 3.1.7673 watches and opens both; so do we.
+  const LABEL_CAPTIONS_V2 = 'captions_v2';
+  const CAPTION_LABELS = [LABEL_CAPTIONS, LABEL_CAPTIONS_V2];
+  const isCaptionLabel = (label) => CAPTION_LABELS.indexOf(label) !== -1;
+  // The live caption channel PER LABEL (Tactiq keeps the same map). With two
+  // channels open, "the" active channel is ambiguous; a drop must reopen the
+  // label that dropped, and closing a superseded channel must not.
+  const activeByLabel = {};
   const LABEL_MEDIA = 'media-session';
   const LABEL_COLLECTIONS = 'collections';
   const LABEL_MESSAGES = 'meet_messages';
@@ -152,8 +161,9 @@
       if (field === 8 && wire === 0) { out.langId = varint(r); return true; }
       return false;
     });
-    if (!out.deviceId || !out.text || out.messageId == null) return null;
-    out.messageVersion = out.messageVersion || 0;
+    // Same acceptance rule as Tactiq: a caption carries deviceId, messageId,
+    // messageVersion and langId. Anything missing one is not a caption frame.
+    if (!out.deviceId || !out.text || !out.messageId || !out.messageVersion || !out.langId) return null;
     return out;
   }
 
@@ -161,6 +171,11 @@
   // bounded compatibility path for additional protobuf envelopes; it still
   // requires the full caption field set and never guesses based on random text.
   function decodeCaptionFrame(bytes) {
+    // A wrapper that also carries field 2 is a control frame, not speech
+    // (Tactiq: BTranscriptMessageWrapper.unknown2 -> ignore).
+    let control = false;
+    walk(bytes, (field) => { if (field === 2) control = true; return false; });
+    if (control) return null;
     const current = dive(bytes, [1]);
     const exact = (current && decodeTranscript(current)) || decodeTranscript(bytes);
     if (exact) return exact;
@@ -529,12 +544,9 @@
 
   function nextChannelId() { channelId += 1; return channelId; }
 
-  function openCaptionChannel(reason, force) {
-    const pc = state.pc;
-    if (!canUsePC(pc)) return false;
-    if (!force && state.cc && state.cc.readyState !== 'closed' && state.cc.readyState !== 'closing') return false;
+  function openOneCaptionChannel(pc, label, reason) {
     try {
-      const channel = pc.createDataChannel(LABEL_CAPTIONS, {
+      const channel = pc.createDataChannel(label, {
         ordered: true,
         maxRetransmits: 10,
         id: nextChannelId(),
@@ -545,18 +557,31 @@
       // Some Chromium/Meet combinations reserve explicit stream IDs. A fallback
       // keeps capture available even if the browser must allocate the ID.
       try {
-        const channel = pc.createDataChannel(LABEL_CAPTIONS, { ordered: true, maxRetransmits: 10 });
+        const channel = pc.createDataChannel(label, { ordered: true, maxRetransmits: 10 });
         watch(channel, 'local-fallback:' + (reason || 'initial'));
         return true;
       } catch (error) {
-        diagnostic('caption-channel-open-failed', { message: error && error.message });
+        diagnostic('caption-channel-open-failed', { label, message: error && error.message });
         return false;
       }
     }
   }
+
+  function openCaptionChannel(reason, force, onlyLabel) {
+    const pc = state.pc;
+    if (!canUsePC(pc)) return false;
+    if (!force && state.cc && state.cc.readyState !== 'closed' && state.cc.readyState !== 'closing') return false;
+    // Open both names so either Meet build serves captions; on recovery, only
+    // the label that dropped.
+    let opened = false;
+    for (const label of (onlyLabel ? [onlyLabel] : CAPTION_LABELS)) {
+      if (openOneCaptionChannel(pc, label, reason)) opened = true;
+    }
+    return opened;
+  }
   window.LSOpenMeetCaptions = () => openCaptionChannel('manual', true);
 
-  function recoverCaptionChannel(reason) {
+  function recoverCaptionChannel(reason, label) {
     if (recoveryInFlight || state.recoveries >= config.maxRecoveries) {
       if (state.recoveries >= config.maxRecoveries) {
         diagnostic('caption-recovery-exhausted', { reason, attempts: state.recoveries });
@@ -565,7 +590,7 @@
     }
     recoveryInFlight = true;
     state.recoveries++;
-    const opened = openCaptionChannel(reason, true);
+    const opened = openCaptionChannel(reason, true, label);
     recoveryInFlight = false;
     if (opened) {
       diagnostic('caption-channel-reopened', { reason, attempt: state.recoveries });
@@ -576,6 +601,7 @@
 
   function adoptCaptionChannel(channel, origin) {
     const previous = state.cc;
+    activeByLabel[channel.label] = channel;
     state.cc = channel;
     state.lastCaptionPacketAt = Date.now();
     if (previous && previous !== channel && previous.readyState === 'open') {
@@ -587,7 +613,7 @@
   function watch(channel, origin) {
     if (!channel || watched.has(channel)) return;
     const label = channel.label;
-    if (label !== LABEL_CAPTIONS && label !== LABEL_MEDIA &&
+    if (!isCaptionLabel(label) && label !== LABEL_MEDIA &&
         label !== LABEL_COLLECTIONS && label !== LABEL_MESSAGES) return;
     watched.add(channel);
 
@@ -629,9 +655,9 @@
       });
     });
     channel.addEventListener('close', () => {
-      if (state.cc === channel) {
+      if (activeByLabel[label] === channel) {
         setTimeout(() => {
-          if (state.cc === channel) recoverCaptionChannel('channel-closed');
+          if (activeByLabel[label] === channel) recoverCaptionChannel('channel-closed', label);
         }, 0);
       }
     });
@@ -737,6 +763,9 @@
         seenChatIds.clear();
         roster.clear();
         state.cc = null;
+        // Channels of the previous meeting must not count as active, or their
+        // late close events would open extra channels on the new connection.
+        for (const k of Object.keys(activeByLabel)) delete activeByLabel[k];
         state.ms = null;
         state.recoveries = 0;
         state.lastAudioEnergy = null;

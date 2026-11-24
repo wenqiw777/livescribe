@@ -222,6 +222,94 @@
       'Run LSDumpStore() to see which actions this meeting dispatches.');
   }, 25000);
 
+  // ---- recovering a store that already exists (Tactiq 3.1.7673's approach) --
+  // Patching createStore only catches a store built AFTER this script runs. In a
+  // real meeting the meeting client's store was already there, no caption ever
+  // came through the hook, and the DOM fallback ran the whole call. So also find
+  // the store where React keeps it — the <Provider store> fiber — and read
+  // captions from STATE rather than actions. Timing stops mattering.
+  //
+  //   state.newLiveTranscription.newLTMessage  { [msgId]: { msgId, text, language,
+  //                                              user: { zoomID, displayName } } }
+  //   state.meeting.meetingTopic               the meeting's real title
+  const ROOTS = ':scope > *, :scope > * > *, :scope > * > * > *';
+  const adopted = new WeakSet();
+
+  const isStore = (s) => s && typeof s === 'object' && typeof s.getState === 'function' &&
+    typeof s.subscribe === 'function' && typeof s.dispatch === 'function';
+  // The meeting client's store carries live transcription; the Workplace shell's
+  // store (contacts, calendar) does not.
+  function isMeetingStore(s) {
+    if (!isStore(s)) return false;
+    try { const st = s.getState(); return !!st && typeof st === 'object' && 'newLiveTranscription' in st; }
+    catch (e) { return false; }
+  }
+
+  function findMeetingStore(doc) {
+    if (!doc || !doc.body) return null;
+    let roots;
+    try { roots = doc.body.querySelectorAll(ROOTS); } catch (e) { return null; }
+    for (const el of roots) {
+      const key = Object.keys(el).find(k => k.startsWith('__reactContainer'));
+      if (!key) continue;
+      const stack = [el[key]];
+      let seen = 0;
+      while (stack.length && seen < 5000) {
+        const f = stack.pop();
+        if (!f) continue;
+        seen++;
+        const st = f.memoizedProps && f.memoizedProps.store;
+        if (isMeetingStore(st)) return st;
+        if (f.sibling) stack.push(f.sibling);
+        if (f.child) stack.push(f.child);
+      }
+    }
+    return null;
+  }
+
+  function adopt(store) {
+    if (adopted.has(store)) return;
+    adopted.add(store);
+    if (stores.indexOf(store) === -1) stores.push(store);
+    window.__ls_zoom_store = store;
+    console.log('[LiveScribe] Zoom meeting store found via React tree — reading captions from state');
+
+    let prevMsgs = null, prevTopic = null;
+    const read = () => {
+      let st;
+      try { st = store.getState(); } catch (e) { return; }
+      const topic = st.meeting && st.meeting.meetingTopic;
+      if (topic && topic !== prevTopic) { prevTopic = topic; send({ type: 'topic', topic }); }
+      const msgs = st.newLiveTranscription && st.newLiveTranscription.newLTMessage;
+      if (!msgs || msgs === prevMsgs) return;
+      // Redux replaces an entry when it changes, so a changed reference is a new
+      // or revised sentence. On the first read everything counts: captions that
+      // arrived before we got here are recovered, not lost.
+      for (const m of Object.values(msgs)) {
+        if (!m || (prevMsgs && prevMsgs[m.msgId] === m)) continue;
+        const u = m.user || {};
+        emitLine(`${m.msgId}/${u.zoomID}`, u.displayName, m.text, m.language);
+      }
+      prevMsgs = msgs;
+    };
+    try { store.subscribe(read); } catch (e) { /* ignore */ }
+    read();
+  }
+
+  function scanForStore() {
+    const docs = [];
+    try {
+      const f = document.querySelector('.pwa-webclient__iframe-wrapper iframe');
+      if (f && f.contentDocument) docs.push(f.contentDocument);
+    } catch (e) { /* cross-origin frame */ }
+    docs.push(document);
+    for (const d of docs) {
+      const s = findMeetingStore(d);
+      if (s) adopt(s);
+    }
+  }
+  setInterval(scanForStore, 100);
+
   // ---- turning the caption stream on --------------------------------------
   // Nothing can be read until Zoom is actually producing a live transcript, and
   // that is normally a manual step. Zoom's own client asks for it by sending a

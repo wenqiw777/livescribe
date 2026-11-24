@@ -61,7 +61,7 @@
     // LS_FRAME_LINE is forwarded UP from a child frame, so ev.source is that
     // frame — not this window. Requiring ev.source === window silently dropped
     // every caption captured in an iframe.
-    if (m.type !== 'LS_FRAME_LINE' && ev.source !== window) return;
+    if (m.type !== 'LS_FRAME_LINE' && m.type !== 'LS_TOPIC' && ev.source !== window) return;
     if (m.type === 'LS_WS_CAPTION') {
       const p = m.payload || {};
       if (!p.text) return;
@@ -72,6 +72,8 @@
       const p = m.payload || {};
       if (!p.text) return;
       emit(p.key, p.speaker, p.text);
+    } else if (m.type === 'LS_TOPIC' && isTop) {
+      if (P.setTitle) P.setTitle((m.payload || {}).topic);
     } else if (m.type === 'LS_MEETING_ENDED') {
       if (P.meetingEnded) P.meetingEnded((m.payload || {}).via);
     } else if (m.type === 'LS_WS_SAMPLES') {
@@ -102,6 +104,9 @@
         if (cap && cap.stop) cap.stop();
       }
       emit('zs:' + d.id, d.speaker || 'Speaker', d.text);
+    } else if (d.type === 'topic') {
+      if (isTop && P.setTitle) P.setTitle(d.topic);
+      else if (!isTop) { try { window.top.postMessage({ __livescribe: true, type: 'LS_TOPIC', payload: { topic: d.topic } }, '*'); } catch (e) {} }
     } else if (d.type === 'cc-enable-result') {
       console.log('[LiveScribe] enable-captions request ' + (d.ok ? 'sent' : 'FAILED (meeting socket not reachable yet)'));
       if (P.onCaptionsEnabled) P.onCaptionsEnabled(d.ok);

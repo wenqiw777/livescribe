@@ -338,11 +338,14 @@ async function waitFor(predicate, timeoutMs = 1000) {
   assert.strictEqual(window.__ls_meet.recoveries, 0,
     'a new peer connection resets the per-meeting recovery budget');
 
+  // Two caption labels are open now (captions, captions_v2); recovery reopens
+  // the label of whichever channel dropped.
   const secondInitial = window.__ls_meet.cc;
-  const beforeSecondClose = channels.filter(channel => channel.label === 'captions').length;
+  const secondLabel = secondInitial.label;
+  const beforeSecondClose = channels.filter(channel => channel.label === secondLabel).length;
   secondInitial.close();
   await wait(20);
-  assert(channels.filter(channel => channel.label === 'captions').length > beforeSecondClose,
+  assert(channels.filter(channel => channel.label === secondLabel).length > beforeSecondClose,
     'the second meeting can recover from an active caption channel close');
 
   const beforeSecondSilence = channels.filter(channel => channel.label === 'captions').length;

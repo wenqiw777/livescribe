@@ -24,6 +24,7 @@
 
   let el, bodyEl, timeEl, askWrap, answerEl;
   let platform = 'meeting';
+  let meetingTitle = '';     // the platform's own topic; the tab title is often just "Home"
   let autoScroll = true;
   let started = false;          // user consented for this meeting
   let ended = false;
@@ -203,7 +204,7 @@
       port.postMessage({ sessionId });
     } catch (e) { /* extension reloading */ }
     send({ type: 'SAVE_SESSION', session: {
-      id: sessionId, platform, title: (document.title || platform).slice(0, 120),
+      id: sessionId, platform, title: (meetingTitle || document.title || platform).slice(0, 120),
       url: location.href, startedAt: C.startedAt(),
     } });
     renderEmpty();
@@ -223,7 +224,7 @@
     return {
       id: sessionId,
       platform,
-      title: (document.title || platform).slice(0, 120),
+      title: (meetingTitle || document.title || platform).slice(0, 120),
       url: location.href,
       startedAt: C.startedAt(),
       endedAt: Date.now(),
@@ -583,6 +584,11 @@
       C.onChange(render);
     },
     exists() { return !!el && document.documentElement.contains(el); },
+    setTitle(t) {
+      if (!t || t === meetingTitle) return;
+      meetingTitle = String(t).slice(0, 120);
+      if (started && sessionId) send({ type: 'SAVE_SESSION', session: { id: sessionId, title: meetingTitle } });
+    },
     meetingEnded(via) {
       finishRecording('Meeting ended — save your transcript?', via || 'view-gone');
     },
